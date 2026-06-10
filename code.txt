@@ -1,0 +1,126 @@
+library(MatchIt)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(tableone)
+library(knitr)
+
+# Storage data frames
+wenjian1 <- data.frame(matrix(0, nrow=6, ncol=1552))  # COL = number of points + 1
+wenjian1[1:3, 1] = 0:2  # Rows 1-3: when layer-1 variable = 0, rows 0-1 are mean values for layer-2 variable (0/1), row 2 is the p-value
+wenjian1[4:6, 1] = 0:2  # Rows 4-6: same structure but for layer-1 variable = 1
+
+wenjian2 <- data.frame(matrix(0, nrow=3, ncol=1552))  # COL = number of points + 1
+wenjian2[1:3, 1] = 0:2  # Rows 0-1 are mean values for variable (0/1), row 2 is the p-value
+
+wenjian3 <- data.frame(matrix(0, nrow=1, ncol=1552))  # COL = number of points + 1
+wenjian3[1, 1] = "Layer-1 variable unmatched"  # Log file for records where layer-1 variable could not be matched
+
+# Loop settings
+n = 99
+for (i in 1:n) {
+  lujing = paste('ecls<-read.xlsx(', "\'", 'D:/data_example/', i, '_2020.xlsx', "\'", ')', sep="")
+  eval(parse(text = lujing))
+
+  Pshu_T <- aggregate(ecls$T, by = list(type = ecls$P), sum)
+  Tshu_P <- aggregate(ecls$P, by = list(type = ecls$T), sum)
+
+  # Case 1: T >= 5 and both groups have observations in P|T and T|P
+  if (sum(ecls$T) >= 5 & all(Pshu_T[1:2, 2] > 0) & all(Tshu_P[1:2, 2] > 0)) {
+    spl <- split(ecls, ecls$T)
+
+    # --- Compute P(0 vs 1) difference when T = 0 ---
+    ecls_cov <- c('L', 'S', 'W', 'Q')
+    m_ps <- glm(P ~ L + S + Q + W,
+                family = binomial(), data = spl$`0`)
+    ecls_nomiss <- spl$`0` %>%  # MatchIt does not allow missing values
+      select(R, P, one_of(ecls_cov)) %>%
+      na.omit()
+    mod_match <- matchit(P ~ L + S + Q + W,
+                         method = "nearest", data = ecls_nomiss, ratio = 1)
+    dta_m <- match.data(mod_match)
+    lm_treat1 <- lm(R ~ P, data = dta_m)
+    canshu <- summary(lm_treat1)
+
+    # Retain p-value for mean significance
+    p_0 <- canshu$coef[2, 4]
+    # Retain group means
+    junzhi_0 <- aggregate(dta_m$R, by = list(type = dta_m$P), mean)
+    rm(canshu, dta_m, ecls_nomiss, lm_treat1, m_ps, mod_match, ecls_cov)
+
+    # --- Compute P(0 vs 1) difference when T = 1 ---
+    ecls_cov <- c('L', 'S', 'W', 'Q')
+    m_ps <- glm(P ~ L + S + Q + W,
+                family = binomial(), data = spl$`1`)
+    ecls_nomiss <- spl$`1` %>%  # MatchIt does not allow missing values
+      select(R, P, one_of(ecls_cov)) %>%
+      na.omit()
+    mod_match <- matchit(P ~ L + S + Q + W,
+                         method = "nearest", data = ecls_nomiss, ratio = 1)
+    dta_m <- match.data(mod_match)
+    lm_treat1 <- lm(R ~ P, data = dta_m)
+    canshu <- summary(lm_treat1)
+
+    # Retain p-value for mean significance
+    p_1 <- canshu$coef[2, 4]
+    # Retain group means
+    junzhi_1 <- aggregate(dta_m$R, by = list(type = dta_m$P), mean)
+    rm(canshu, dta_m, ecls_nomiss, lm_treat1, m_ps, mod_match, ecls_cov)
+
+    # Set storage flag
+    SS <- 1
+  }
+
+  # Case 2: T >= 5 but at least one group is empty in P|T or T|P (layer-1 variable unmatched)
+  if (sum(ecls$T) >= 5 & (any(Pshu_T[1:2, 2] == 0) | any(Tshu_P[1:2, 2] == 0))) {
+    ecls_cov <- c('L', 'S', 'W', 'Q', 'P')
+    m_ps <- glm(T ~ L + S + Q + W + P,
+                family = binomial(), data = ecls)
+    ecls_nomiss <- ecls %>%  # MatchIt does not allow missing values
+      select(R, T, one_of(ecls_cov)) %>%
+      na.omit()
+    mod_match <- matchit(T ~ L + S + Q + W + P,
+                         method = "nearest", data = ecls_nomiss, ratio = 1)
+    dta_m <- match.data(mod_match)
+    lm_treat1 <- lm(R ~ T, data = dta_m)
+    canshu <- summary(lm_treat1)
+
+    # Retain p-value for mean significance
+    p <- canshu$coef[2, 4]
+    # Retain group means
+    junzhi <- aggregate(dta_m$R, by = list(type = dta_m$T), mean)
+
+    # Set storage flag
+    SS <- 2
+    rm(canshu, dta_m, ecls_nomiss, lm_treat1, m_ps, mod_match, ecls_cov)
+  }
+
+  # Case 3: T < 5 — insufficient observations, skip matching
+  if (sum(ecls$T) < 5) {
+    SS <- 3
+  }
+
+  # --- Write results to the appropriate storage frame ---
+  if (SS == 1) {
+    wenjian1[1:2, i+1] <- junzhi_0$x   # Group means for T=0
+    wenjian1[3,   i+1] <- p_0           # P-value for T=0
+    wenjian1[4:5, i+1] <- junzhi_1$x   # Group means for T=1
+    wenjian1[6,   i+1] <- p_1           # P-value for T=1
+    rm(spl, junzhi_0, p_0, junzhi_1, p_1)
+  }
+  if (SS == 2) {
+    wenjian2[1:2, i+1] <- junzhi$x     # Group means (collapsed across T)
+    wenjian2[3,   i+1] <- p            # P-value
+    rm(junzhi, p)
+  }
+  if (SS == 3) {
+    wenjian3[1, i+1] <- 1              # Mark point as unmatched (1 = skipped)
+  }
+
+  rm(ecls, lujing, Pshu_T, Tshu_P)
+}
+
+# Export results
+write.xlsx(wenjian1, "D:/res/res_2020_THPH_ss1.xlsx")
+write.xlsx(wenjian2, "D:/res/res_2020_THPH_ss2.xlsx")
+write.xlsx(wenjian3, "D:/res/res_2020_THPH_ss3.xlsx")
